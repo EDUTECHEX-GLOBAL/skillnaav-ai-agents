@@ -19,15 +19,27 @@ MONGO_URI = os.getenv("MONGO_URI", "")
 DB_NAME = os.getenv("MONGO_DB_NAME", "skillnaav")
 
 if not MONGO_URI:
-    raise ValueError("MONGO_URI environment variable is not set. Cannot connect to the database.")
+    import logging as _log
+    _log.warning("MONGO_URI is not set — recommendation DB calls will fail at runtime.")
 
-client = AsyncIOMotorClient(MONGO_URI)
-db = client[DB_NAME]
+# Lazy DB initialisation so missing env vars don't crash the worker on boot
+_mongo_client = None
+_db = None
 
-application_collection = db.applications
-user_collection = db.userwebapps
-internship_collection = db.internshippostings
-personality_collection = db.personalityresponses # or whatever your personality results collection is
+def _get_db():
+    global _mongo_client, _db
+    if _db is None:
+        if not MONGO_URI:
+            raise RuntimeError("MONGO_URI environment variable is not set.")
+        _mongo_client = AsyncIOMotorClient(MONGO_URI)
+        _db = _mongo_client[DB_NAME]
+    return _db
+
+# Collection accessors (evaluated lazily)
+def _application_collection():  return _get_db().applications
+def _user_collection():          return _get_db().userwebapps
+def _internship_collection():    return _get_db().internshippostings
+def _personality_collection():   return _get_db().personalityresponses
 
 
 # Level ranking for career progression logic
@@ -79,7 +91,7 @@ async def derive_signals(student: Dict[str, Any]) -> Dict[str, List[str]]:
 
 async def infer_from_recent_applications(student_id: ObjectId) -> Dict[str, Any]:
     """Infers skills, roles, and highest level from a student's recent applications."""
-    last_apps_cursor = application_collection.find({
+    last_apps_cursor = _application_collection().find({
         'studentId': student_id,
         'status': 'Completed'
     }).sort('appliedDate', -1).limit(10)
@@ -122,7 +134,7 @@ async def infer_from_recent_applications(student_id: ObjectId) -> Dict[str, Any]
 
 async def get_personality(student_id_obj: ObjectId) -> Dict[str, Any]:
     """Fetches RIASEC personality test results for a student."""
-    personality = await personality_collection.find_one({'userId': student_id_obj})
+    personality = await _personality_collection().find_one({'userId': student_id_obj})
     if not personality:
         return {'hollandCode': '', 'dominantTraits': []}
     holland_code = personality.get('hollandCode', '') or ''
@@ -206,7 +218,7 @@ async def get_personalized_recommendations(student_id: str, limit: int = 6) -> D
     print("Generating fresh recommendations (no cache)")
 
     student_id_obj = ObjectId(student_id)
-    student = await user_collection.find_one({'_id': student_id_obj})
+    student = await _user_collection().find_one({'_id': student_id_obj})
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
 
@@ -225,7 +237,7 @@ async def get_personalized_recommendations(student_id: str, limit: int = 6) -> D
     personality = await get_personality(student_id_obj)
     dominant_traits = personality.get('dominantTraits', [])
 
-    applied_ids = await application_collection.distinct('internshipId', {'studentId': student_id_obj})
+    applied_ids = await _application_collection().distinct('internshipId', {'studentId': student_id_obj})
 
     matched_sectors = set()
     for trait in dominant_traits:
@@ -238,7 +250,7 @@ async def get_personalized_recommendations(student_id: str, limit: int = 6) -> D
     if matched_sectors:
         query['sector'] = {'$in': list(matched_sectors)}
 
-    candidates_cursor = internship_collection.find(query).limit(100)
+    candidates_cursor = _internship_collection().find(query).limit(100)
     candidates = await candidates_cursor.to_list(length=100)
 
     if not candidates:
@@ -246,7 +258,7 @@ async def get_personalized_recommendations(student_id: str, limit: int = 6) -> D
             'applicationOpen': True,
             '_id': {'$nin': applied_ids}
         }
-        candidates_cursor = internship_collection.find(query).limit(100)
+        candidates_cursor = _internship_collection().find(query).limit(100)
         candidates = await candidates_cursor.to_list(length=100)
 
     student_text = ' '.join(signals['skills'] + signals['roles'] + signals['locations'])
@@ -261,7 +273,7 @@ async def get_personalized_recommendations(student_id: str, limit: int = 6) -> D
     final_list = [item['job'] for item in scored_jobs[:limit]]
 
     if not final_list or (scored_jobs and scored_jobs[0]['score'] <= 0):
-        fallback_cursor = internship_collection.find({
+        fallback_cursor = _internship_collection().find({
             'applicationOpen': True,
             '_id': {'$nin': applied_ids},
             'classification': {'$in': ['basic', 'intermediate']}

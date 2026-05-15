@@ -15,23 +15,31 @@ from datetime import datetime  # For timestamp utility
 
 # Load environment variables
 load_dotenv()
+
+# Logging (must be before credential check so warning() works)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 aws_access_key_id = os.getenv("AWS_ACCESS_KEY_ID")
 aws_secret_access_key = os.getenv("AWS_SECRET_ACCESS_KEY")
 aws_region = os.getenv("AWS_REGION")
 if not all([aws_access_key_id, aws_secret_access_key, aws_region]):
-    raise ValueError("Missing AWS credentials or region. Check your .env file!")
+    logging.warning("Missing AWS credentials or region — Bedrock calls will fail at runtime.")
 
-# Initialize Bedrock client
-bedrock_client = boto3.client(
-    service_name="bedrock-runtime",
-    region_name=aws_region,
-    aws_access_key_id=aws_access_key_id,
-    aws_secret_access_key=aws_secret_access_key
-)
+# Initialize Bedrock client lazily so missing creds don't crash the worker on boot
+_bedrock_client = None
 
-# Logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+def _get_bedrock():
+    global _bedrock_client
+    if _bedrock_client is None:
+        if not all([aws_access_key_id, aws_secret_access_key, aws_region]):
+            raise RuntimeError("AWS credentials not configured. Set AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION.")
+        _bedrock_client = boto3.client(
+            service_name="bedrock-runtime",
+            region_name=aws_region,
+            aws_access_key_id=aws_access_key_id,
+            aws_secret_access_key=aws_secret_access_key,
+        )
+    return _bedrock_client
 
 app = FastAPI()
 
@@ -178,7 +186,7 @@ def invoke_bedrock(prompt_text):
             "temperature": 0.3,  # Lower temperature for more consistent outputs
             "top_p": 0.9
         }
-        response = bedrock_client.invoke_model(
+        response = _get_bedrock().invoke_model(
             modelId="meta.llama3-8b-instruct-v1:0",
             body=json.dumps(body),
             contentType="application/json",
