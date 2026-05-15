@@ -5,9 +5,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import ORJSONResponse
 from motor.motor_asyncio import AsyncIOMotorClient # type: ignore
 from bson import ObjectId
-from sentence_transformers import SentenceTransformer, util
 from typing import List, Dict, Any, Union
-from embedding_model import embedder
+from embedding_model import embedder, util   # lazy proxies — PyTorch loads on first use
 
 # Load environment variables from .env filessss
 load_dotenv()

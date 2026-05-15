@@ -4,7 +4,7 @@ import os
 import fitz  # PyMuPDF for PDFs
 import docx  # python-docx for DOCX files
 import logging
-import spacy
+# spacy imported lazily — see _get_nlp()
 import boto3 # type: ignore
 from dotenv import load_dotenv
 import time
@@ -52,8 +52,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Load NLP model
-nlp = spacy.load("en_core_web_sm")
+# Lazy-load spacy model — loading at import time costs ~150 MB and can OOM on boot
+_nlp = None
+
+def _get_nlp():
+    global _nlp
+    if _nlp is None:
+        import spacy
+        _nlp = spacy.load("en_core_web_sm")
+    return _nlp
 
 # Utility function for current timestamp
 def now():

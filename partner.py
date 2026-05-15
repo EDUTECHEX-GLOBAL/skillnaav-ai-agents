@@ -18,13 +18,13 @@ from urllib.parse import urlparse
 from pymongo import MongoClient, UpdateOne
 from bson import ObjectId
 from bson.errors import InvalidId
-from sentence_transformers import SentenceTransformer, util
+# sentence_transformers/PyTorch deferred — imported lazily via embedding_model proxy
 import requests
 import httpx
 from fastapi import BackgroundTasks
 from pydantic import BaseModel
 from typing import List
-from embedding_model import embedder
+from embedding_model import embedder, util  # lazy proxies; PyTorch loads on first request
 
 class ShortlistRequest(BaseModel):
     internship_id: str
@@ -56,17 +56,28 @@ def extract_school_admin_id(application):
     return None
 
 # === Setup ===
-print(f"[{now()}] Loading embedding model...")
+print(f"[{now()}] Partner module loaded (DB connects lazily on first request)")
 
+# Lazy MongoDB initialisation — a missing/invalid MONGO_URI would crash the worker
+# on import if we connected here.  We defer until first use instead.
+_partner_db = None
 
-db = MongoClient(os.getenv("MONGO_URI")).get_default_database()
-print(f"[{now()}] Connected to MongoDB: {db.name}")
-shortlist_collection = db["shortlisted_candidates"]
-applications_collection = db["applications"]
-candidate_pipeline = db["candidatepipelines"]
+def _get_partner_db():
+    global _partner_db
+    if _partner_db is None:
+        uri = os.getenv("MONGO_URI", "")
+        if not uri:
+            raise RuntimeError("MONGO_URI environment variable is not set.")
+        _partner_db = MongoClient(uri).get_default_database()
+        _partner_db["shortlisted_candidates"].create_index(
+            [("internship_id", 1), ("school_admin_id", 1)]
+        )
+        print(f"[{now()}] Connected to MongoDB (partner): {_partner_db.name}")
+    return _partner_db
 
-shortlist_collection.create_index([("internship_id", 1), ("school_admin_id", 1)])
-print(f"[{now()}] Created MongoDB indexes")
+def _shortlist_collection():    return _get_partner_db()["shortlisted_candidates"]
+def _applications_collection(): return _get_partner_db()["applications"]
+def _candidate_pipeline():      return _get_partner_db()["candidatepipelines"]
 
 # === Resume Utilities ===
 def download_resume_from_s3(resume_url: str):
@@ -158,7 +169,7 @@ def compute_ats_similarity(text: str, job_embedding) -> float:
 
 async def process_resume(resume_url, job_embedding):
     application = await asyncio.get_event_loop().run_in_executor(
-        None, lambda: applications_collection.find_one({"resumeUrl": resume_url})
+        None, lambda: _applications_collection().find_one({"resumeUrl": resume_url})
     )
 
     if not application:
@@ -236,7 +247,7 @@ def sync_shortlisted_to_pipeline(candidates, internship_obj_id):
         )
 
     if ops:
-        candidate_pipeline.bulk_write(ops)
+        _candidate_pipeline().bulk_write(ops)
 
 # === FastAPI App Init ===
 app = FastAPI()
@@ -347,7 +358,7 @@ async def shortlist_candidates(
     # Prevents duplicate shortlist entries and re-processing on repeated clicks.
     already_shortlisted_urls = set(
         doc["resumeUrl"]
-        for doc in applications_collection.find(
+        for doc in _applications_collection().find(
             {
                 "internshipId": internship_obj_id,
                 "resumeUrl": {"$in": resumes},
@@ -363,7 +374,7 @@ async def shortlist_candidates(
         print(f"[{now()}] ⏭ Skipping {len(already_shortlisted_urls)} already-shortlisted resume(s).")
 
     if not pending_resumes:
-        existing = list(shortlist_collection.find({"internship_id": internship_obj_id}))
+        existing = list(_shortlist_collection().find({"internship_id": internship_obj_id}))
         print(f"[{now()}] ✅ All resumes already shortlisted — returning cached results.")
         return {"shortlisted_candidates": convert_object_ids(existing)}
 
@@ -386,7 +397,7 @@ async def shortlist_candidates(
     shortlisted_resume_urls = [c["resumeUrl"] for c in candidates]
 
     # All applications for this internship
-    all_applications = list(applications_collection.find({"internshipId": internship_obj_id}))
+    all_applications = list(_applications_collection().find({"internshipId": internship_obj_id}))
     all_resume_urls  = [app["resumeUrl"] for app in all_applications]
 
     # ── FIX 2: Rejected = everyone not shortlisted (now OR previously) ────────
@@ -398,9 +409,9 @@ async def shortlist_candidates(
     )
 
     if candidates:
-        shortlist_collection.insert_many(candidates)
+        _shortlist_collection().insert_many(candidates)
 
-        applications_collection.update_many(
+        _applications_collection().update_many(
             {"resumeUrl": {"$in": shortlisted_resume_urls}},
             {"$set": {"status": "Shortlisted"}}
         )
@@ -411,7 +422,7 @@ async def shortlist_candidates(
     # This runs even when NO candidate clears 0.3, so applications never stay
     # stuck in "Applied" forever.
     if rejected_resume_urls:
-        applications_collection.update_many(
+        _applications_collection().update_many(
             {
                 "resumeUrl": {"$in": rejected_resume_urls},
                 "status": {"$nin": ["Shortlisted"]},  # safety: never downgrade
@@ -422,7 +433,7 @@ async def shortlist_candidates(
 
         # Send rejection notifications
         for resume_url in rejected_resume_urls:
-            app_doc = applications_collection.find_one({"resumeUrl": resume_url})
+            app_doc = _applications_collection().find_one({"resumeUrl": resume_url})
             if app_doc:
                 background_tasks.add_task(notify_rejection, app_doc)
 
@@ -484,7 +495,7 @@ async def get_shortlisted_by_admin(
     }
 
     try:
-        docs = list(shortlist_collection.find(query))
+        docs = list(_shortlist_collection().find(query))
 
         # Fix old records + strip text
         docs = enrich_shortlist_docs(docs)
@@ -514,7 +525,7 @@ async def get_shortlisted_candidates(
 
     try:
         docs = list(
-            shortlist_collection.find(
+            _shortlist_collection().find(
                 {"internship_id": internship_obj_id}
             )
         )
@@ -535,7 +546,7 @@ async def get_shortlisted_candidates(
 @app.get("/partner/fetch-applications/{job_id}")
 async def fetch_applications(job_id: str):
     try:
-        apps = list(applications_collection.find({"job_id": job_id}, {"_id": 0}))
+        apps = list(_applications_collection().find({"job_id": job_id}, {"_id": 0}))
         return {"applications": convert_object_ids(apps)}
     except Exception as e:
         return {"error": str(e)}
