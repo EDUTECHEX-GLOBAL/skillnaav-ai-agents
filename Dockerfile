@@ -2,16 +2,15 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y \
-    gcc \
-    g++ \
-    build-essential \
-    poppler-utils \
-    && rm -rf /var/lib/apt/lists/*
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
 COPY requirements.txt .
 
-RUN pip install --upgrade pip
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir -r requirements.txt
 
@@ -19,10 +18,6 @@ RUN python -m spacy download en_core_web_sm
 
 COPY . .
 
-ENV PORT=8080
+EXPOSE 8000
 
-CMD exec gunicorn app:app \
-    -k uvicorn.workers.UvicornWorker \
-    --bind 0.0.0.0:$PORT \
-    --workers 1 \
-    --timeout 300
+CMD ["gunicorn", "-w", "1", "-k", "uvicorn.workers.UvicornWorker", "app:app", "--bind", "0.0.0.0:8000", "--timeout", "300"]
