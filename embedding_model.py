@@ -16,7 +16,7 @@ def _load():
     global _model, _util
     if _model is None:
         from sentence_transformers import SentenceTransformer, util as _st_util
-        _model = SentenceTransformer("all-MiniLM-L6-v2")
+        _model = SentenceTransformer("paraphrase-MiniLM-L3-v2")
         _util  = _st_util
 
 
