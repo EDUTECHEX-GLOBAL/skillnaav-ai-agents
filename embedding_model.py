@@ -4,6 +4,7 @@ Lazy wrapper around SentenceTransformer.
 `sentence_transformers` imports PyTorch which costs ~200 MB of RSS.
 Deferring the import until first use keeps the gunicorn worker well
 under Render's free-tier 512 MB limit during startup.
+changes
 """
 from __future__ import annotations
 from typing import Any
