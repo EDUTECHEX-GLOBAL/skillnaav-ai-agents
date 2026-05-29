@@ -16,8 +16,20 @@ _util  = None   # sentence_transformers.util — also deferred
 def _load():
     global _model, _util
     if _model is None:
-        from sentence_transformers import SentenceTransformer, util as _st_util
-        _model = SentenceTransformer("paraphrase-MiniLM-L3-v2", model_kwargs={"low_cpu_mem_usage": False})
+        from sentence_transformers import SentenceTransformer, models, util as _st_util
+        
+        # In sentence-transformers 2.6.1, we must pass low_cpu_mem_usage via models.Transformer
+        word_embedding_model = models.Transformer(
+            "sentence-transformers/paraphrase-MiniLM-L3-v2", 
+            model_args={"low_cpu_mem_usage": False}
+        )
+        pooling_model = models.Pooling(
+            word_embedding_model.get_word_embedding_dimension(),
+            pooling_mode_mean_tokens=True,
+            pooling_mode_cls_token=False,
+            pooling_mode_max_tokens=False
+        )
+        _model = SentenceTransformer(modules=[word_embedding_model, pooling_model])
         _util  = _st_util
 
 
