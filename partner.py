@@ -15,6 +15,7 @@ from typing import Optional
 from datetime import datetime
 from urllib.parse import urlparse
 from pymongo import MongoClient, UpdateOne
+from pymongo.errors import BulkWriteError
 from bson import ObjectId
 from bson.errors import InvalidId
 # sentence_transformers/PyTorch deferred — imported lazily via embedding_model proxy
@@ -63,6 +64,15 @@ def convert_object_ids(obj):
         return {k: (str(v) if isinstance(v, ObjectId) else convert_object_ids(v)) for k, v in obj.items()}
     else:
         return obj
+
+def strip_shortlist_runtime_fields(candidate: dict) -> dict:
+    """
+    Keep database shortlist documents small and BSON-safe.
+    Resume text is only needed during scoring/Claude evaluation, not after.
+    """
+    cleaned = dict(candidate)
+    cleaned.pop("text", None)
+    return cleaned
 
 def extract_school_admin_id(application):
     for key in ["schoolAdmin", "school_admin_id", "schoolAdminId"]:
@@ -540,7 +550,13 @@ async def shortlist_candidates(
 
     # ── Process only pending resumes ──────────────────────────────────────────
     tasks = [process_resume(url, job_embedding) for url in pending_resumes]
-    results = await asyncio.gather(*tasks)
+    raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+    results = []
+    for resume_url, result in zip(pending_resumes, raw_results):
+        if isinstance(result, Exception):
+            print(f"[{now()}] ⚠️ Resume processing failed for {resume_url}: {result}")
+            continue
+        results.append(result)
 
     # ── AI Agent: Claude evaluates borderline resumes ─────────────────
     # Band: CLAUDE_LOWER <= ats_score < CLAUDE_UPPER  →  Claude decides
@@ -596,10 +612,14 @@ async def shortlist_candidates(
 
     # Shortlisted resume URLs from this run
     shortlisted_resume_urls = [c["resumeUrl"] for c in candidates]
+    processed_resume_urls = [r["resumeUrl"] for r in results if r and r.get("resumeUrl")]
 
-    # All applications for this internship
-    all_applications = list(_applications_collection().find({"internshipId": internship_obj_id}))
-    all_resume_urls  = [app["resumeUrl"] for app in all_applications]
+    # Applications processed in this request only.
+    all_applications = list(_applications_collection().find({
+        "internshipId": internship_obj_id,
+        "resumeUrl": {"$in": processed_resume_urls},
+    }))
+    all_resume_urls = [app.get("resumeUrl") for app in all_applications if app.get("resumeUrl")]
 
     # ── FIX 2: Rejected = everyone not shortlisted (now OR previously) ────────
     rejected_resume_urls = list(
@@ -609,14 +629,21 @@ async def shortlist_candidates(
     )
 
     if candidates:
-        _shortlist_collection().insert_many(candidates)
+        candidates_to_store = [strip_shortlist_runtime_fields(c) for c in candidates]
+        try:
+            _shortlist_collection().insert_many(candidates_to_store, ordered=False)
+        except BulkWriteError as bwe:
+            print(f"[{now()}] ⚠️ Shortlist insert partial failure: {bwe.details}")
 
         _applications_collection().update_many(
             {"resumeUrl": {"$in": shortlisted_resume_urls}},
             {"$set": {"status": "Shortlisted"}}
         )
 
-        sync_shortlisted_to_pipeline(candidates, internship_obj_id)
+        try:
+            sync_shortlisted_to_pipeline(candidates, internship_obj_id)
+        except Exception as pipeline_error:
+            print(f"[{now()}] ⚠️ Pipeline sync failed after shortlist: {pipeline_error}")
 
     # ── FIX 3: Always mark non-shortlisted as Rejected ────────────────────────
     if rejected_resume_urls:
