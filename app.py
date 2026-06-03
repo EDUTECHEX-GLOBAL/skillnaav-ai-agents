@@ -103,10 +103,16 @@ print("[unified] All routes registered.\n")
 async def warmup_embedding_model():
     import asyncio
     from embedding_model import embedder
-    loop = asyncio.get_event_loop()
-    print("[unified] Warming up embedding model — subsequent requests will be instant...")
-    await loop.run_in_executor(None, lambda: embedder.encode("warmup ping"))
-    print("[unified] Embedding model ready.")
+
+    async def _warmup():
+        loop = asyncio.get_event_loop()
+        print("[unified] Warming up embedding model in background...")
+        await loop.run_in_executor(None, lambda: embedder.encode("warmup ping"))
+        print("[unified] Embedding model ready.")
+
+    # Fire-and-forget — startup returns immediately so the port binds instantly.
+    # Render/Docker health checks pass without waiting for the 30s PyTorch load.
+    asyncio.create_task(_warmup())
 
 
 # ── Root convenience route ────────────────────────────────────────────────────
