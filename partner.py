@@ -332,9 +332,9 @@ async def process_resume(resume_url, job_embedding):
     ext = os.path.splitext(urlparse(resume_url).path)[-1].lower()
     print(f"[{now()}] Extracting resume as {ext}")
     if ext == ".pdf":
-        text = await _loop.run_in_executor(None, extract_text_from_pdf, file_stream)
+        text = await asyncio.get_running_loop().run_in_executor(None, extract_text_from_pdf, file_stream)
     elif ext == ".docx":
-        text = await _loop.run_in_executor(None, extract_text_from_docx, file_stream)
+        text = await asyncio.get_running_loop().run_in_executor(None, extract_text_from_docx, file_stream)
     else:
         print(f"[{now()}] Unsupported file type: {ext}")
         return None
@@ -1028,6 +1028,7 @@ async def extract_resume(data: ResumeRequest):
 
     # 2️⃣ Extract raw text
     ext = os.path.splitext(urlparse(resume_url).path)[-1].lower()
+    _loop = asyncio.get_running_loop()
     if ext == ".pdf":
         text = await _loop.run_in_executor(None, extract_text_from_pdf, file_stream)
     elif ext == ".docx":
