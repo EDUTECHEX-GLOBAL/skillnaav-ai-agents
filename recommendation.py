@@ -17,6 +17,14 @@ load_dotenv()
 
 app = FastAPI()
 
+# ── In-flight request deduplication ──────────────────────────────────────────
+# FIX: When two requests for the same student arrive before either completes
+# (e.g. React StrictMode double-invoke, browser retry), both would miss the
+# cache, run the full pipeline in parallel, and race on the cache write.
+# This dict maps student_id → asyncio.Event so the second caller simply waits
+# for the first to finish, then reads the freshly-written cache.
+_inflight: Dict[str, asyncio.Event] = {}
+
 # ── MongoDB setup ─────────────────────────────────────────────────────────────
 MONGO_URI = os.getenv("MONGO_URI", "")
 DB_NAME = os.getenv("MONGO_DB_NAME", "skillnaav")
@@ -505,22 +513,40 @@ async def get_personalized_recommendations(
 
     student_id_obj = ObjectId(student_id)
 
-    # ── FIX #2: serve from cache if fresh ────────────────────────────────────
-    try:
-        cached = await _cache_collection().find_one({'studentId': student_id_obj})
-        if cached:
-            cached_at: datetime = cached.get('cachedAt')
-            if cached_at:
-                # Make timezone-aware for safe comparison
-                if cached_at.tzinfo is None:
-                    cached_at = cached_at.replace(tzinfo=timezone.utc)
-                age = datetime.now(timezone.utc) - cached_at
-                if age < timedelta(hours=CACHE_TTL_HOURS):
-                    print(f"[cache HIT]  student={student_id}  age={int(age.total_seconds()//60)} min")
-                    return {'recommendations': cached['recommendations'][:limit]}
-    except Exception as cache_err:
-        # Cache read failure must never block the main recommendation flow
-        print(f"[cache] Read error (non-fatal): {cache_err}")
+    # ── Cache check ───────────────────────────────────────────────────────────
+    async def _read_cache():
+        try:
+            cached = await _cache_collection().find_one({'studentId': student_id_obj})
+            if cached:
+                cached_at: datetime = cached.get('cachedAt')
+                if cached_at:
+                    if cached_at.tzinfo is None:
+                        cached_at = cached_at.replace(tzinfo=timezone.utc)
+                    age = datetime.now(timezone.utc) - cached_at
+                    if age < timedelta(hours=CACHE_TTL_HOURS):
+                        return cached['recommendations'][:limit]
+        except Exception as cache_err:
+            print(f"[cache] Read error (non-fatal): {cache_err}")
+        return None
+
+    cached_result = await _read_cache()
+    if cached_result is not None:
+        print(f"[cache HIT]  student={student_id}")
+        return {'recommendations': cached_result}
+
+    # ── FIX: in-flight deduplication ─────────────────────────────────────────
+    # If another coroutine is already computing for this student, wait for it
+    # then return from cache — avoids double pipeline run + double Claude call.
+    if student_id in _inflight:
+        print(f"[inflight] Waiting for in-progress request for student={student_id}...")
+        await _inflight[student_id].wait()
+        cached_result = await _read_cache()
+        if cached_result is not None:
+            return {'recommendations': cached_result}
+        # If cache still empty after wait, fall through and compute anyway
+    
+    event = asyncio.Event()
+    _inflight[student_id] = event
 
     print(f"[cache MISS] Generating fresh recommendations for student={student_id}")
 
@@ -644,8 +670,7 @@ async def get_personalized_recommendations(
     # Convert ObjectIds to strings for JSON serialisation
     final_list = convert_object_ids(final_list)
 
-    # ── FIX #2: persist to cache — only when we have actual results ───────────
-    # Never cache an empty list; let the next request try a fresh computation.
+    # ── Persist to cache — only when we have actual results ──────────────────
     if final_list:
         try:
             await _cache_collection().update_one(
@@ -662,6 +687,10 @@ async def get_personalized_recommendations(
             print(f"[cache] Write error (non-fatal): {cache_err}")
     else:
         print(f"[cache] Skipping cache — empty result set (will retry on next request)")
+
+    # ── FIX: release in-flight lock so any waiting requests can read from cache
+    if student_id in _inflight:
+        _inflight.pop(student_id).set()   # unblock all waiters
 
     return {'recommendations': final_list}
 

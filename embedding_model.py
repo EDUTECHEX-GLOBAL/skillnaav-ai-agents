@@ -4,25 +4,31 @@ Lazy wrapper around SentenceTransformer.
 `sentence_transformers` imports PyTorch which costs ~200 MB of RSS.
 Deferring the import until first use keeps the gunicorn worker well
 under Render's free-tier 512 MB limit during startup.
-changes
 """
 from __future__ import annotations
+import threading
 from typing import Any
 
 _model = None
 _util  = None   # sentence_transformers.util — also deferred
+_lock  = threading.Lock()  # FIX: prevents concurrent threads from double-loading
 
 
 def _load():
     global _model, _util
-    if _model is None:
+    # Fast path — already loaded (no lock needed once set)
+    if _model is not None:
+        return
+    # Slow path — acquire lock so only ONE thread loads the model
+    with _lock:
+        if _model is not None:   # re-check inside lock (classic double-checked locking)
+            return
         from sentence_transformers import SentenceTransformer, util as _st_util
-        
-        # Use clean initialization with model_kwargs to bypass meta tensor bugs
-        _model = SentenceTransformer(
-            "paraphrase-MiniLM-L3-v2", 
-            model_kwargs={"low_cpu_mem_usage": False}
-        )
+
+        # DO NOT pass model_kwargs with low_cpu_mem_usage — it triggers the
+        # "Cannot copy out of meta tensor" bug on torch 2.x + transformers 4.3x.
+        # The plain constructor is safe and correct.
+        _model = SentenceTransformer("paraphrase-MiniLM-L3-v2")
         _util  = _st_util
 
 

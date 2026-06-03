@@ -93,6 +93,22 @@ _absorb(_recommend.app,   "recommend")
 _absorb(_instructor.instructor_app,  "instructor")
 print("[unified] All routes registered.\n")
 
+
+# ── Startup: warm up the embedding model on the UNIFIED app ──────────────────
+# FIX: The @app.on_event("startup") in recommendation.py is bound to that
+# module's own FastAPI instance, not the root app. Routes are absorbed but
+# lifecycle hooks are NOT — so the warmup never ran and every cold request
+# paid a 15-30 s PyTorch load penalty. Re-register it here on the real app.
+@app.on_event("startup")
+async def warmup_embedding_model():
+    import asyncio
+    from embedding_model import embedder
+    loop = asyncio.get_event_loop()
+    print("[unified] Warming up embedding model — subsequent requests will be instant...")
+    await loop.run_in_executor(None, lambda: embedder.encode("warmup ping"))
+    print("[unified] Embedding model ready.")
+
+
 # ── Root convenience route ────────────────────────────────────────────────────
 @app.get("/", include_in_schema=False)
 def root():
