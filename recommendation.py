@@ -435,10 +435,15 @@ RESPONSE FORMAT (strict JSON array, {limit} items):
 
     try:
         print(f"[claude] Re-ranking {len(top_candidates)} candidates → top {limit} ...")
-        response = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=600,
-            messages=[{"role": "user", "content": prompt}],
+        # Hard 25s timeout on the Claude call — prevents the entire worker from
+        # hanging indefinitely and getting killed by gunicorn.
+        response = await asyncio.wait_for(
+            client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=600,
+                messages=[{"role": "user", "content": prompt}],
+            ),
+            timeout=25.0,
         )
 
         raw_text = response.content[0].text.strip()
@@ -475,6 +480,9 @@ RESPONSE FORMAT (strict JSON array, {limit} items):
         print(f"[claude] Re-ranking complete. Returning {len(result)} jobs.")
         return result
 
+    except asyncio.TimeoutError:
+        print("[claude] API call timed out after 25s — falling back to embedding order")
+        return top_candidates[:limit]
     except json.JSONDecodeError as e:
         print(f"[claude] JSON parse error — falling back to embedding order. Error: {e}")
         return top_candidates[:limit]
