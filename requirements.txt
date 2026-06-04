@@ -17,9 +17,9 @@ docx2txt==0.8
 reportlab==4.4.10
 spacy==3.8.4
 sentence-transformers==3.0.1
+optimum[onnxruntime]==1.19.2
 pymongo[srv]==4.6.1
 motor==3.4.0
 dnspython==2.6.1    
 anthropic>=0.25.0  
 gunicorn==23.0.0       
-torch==2.2.2

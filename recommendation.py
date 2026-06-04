@@ -216,7 +216,7 @@ def _precompute_field_embeddings(student: Dict[str, Any]) -> Dict[str, Any]:
     if not fields:
         return {}
 
-    embeddings = embedder.encode(fields, convert_to_tensor=True, batch_size=64)
+    embeddings = embedder.encode(fields, batch_size=64)
     return {field: embeddings[i] for i, field in enumerate(fields)}
 
 
@@ -322,7 +322,7 @@ def batch_score_jobs(
         job_texts.append(text or 'internship')
 
     # ONE batched encode for all 100 jobs
-    job_embeddings = embedder.encode(job_texts, convert_to_tensor=True, batch_size=64)
+    job_embeddings = embedder.encode(job_texts, batch_size=64)
 
     # Cosine similarity: student vs all jobs at once → shape (N,)
     sim_scores = util.cos_sim(student_embedding, job_embeddings)[0]
@@ -435,15 +435,10 @@ RESPONSE FORMAT (strict JSON array, {limit} items):
 
     try:
         print(f"[claude] Re-ranking {len(top_candidates)} candidates → top {limit} ...")
-        # Hard 25s timeout on the Claude call — prevents the entire worker from
-        # hanging indefinitely and getting killed by gunicorn.
-        response = await asyncio.wait_for(
-            client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=600,
-                messages=[{"role": "user", "content": prompt}],
-            ),
-            timeout=25.0,
+        response = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=600,
+            messages=[{"role": "user", "content": prompt}],
         )
 
         raw_text = response.content[0].text.strip()
@@ -480,9 +475,6 @@ RESPONSE FORMAT (strict JSON array, {limit} items):
         print(f"[claude] Re-ranking complete. Returning {len(result)} jobs.")
         return result
 
-    except asyncio.TimeoutError:
-        print("[claude] API call timed out after 25s — falling back to embedding order")
-        return top_candidates[:limit]
     except json.JSONDecodeError as e:
         print(f"[claude] JSON parse error — falling back to embedding order. Error: {e}")
         return top_candidates[:limit]
@@ -628,7 +620,7 @@ async def get_personalized_recommendations(
     # Encode the student profile (one call)
     loop = asyncio.get_event_loop()
     student_embedding = await loop.run_in_executor(
-        None, lambda: embedder.encode(student_text, convert_to_tensor=True)
+        None, lambda: embedder.encode(student_text)
     )
 
     # Batch-encode all job texts + score in one executor call (no event loop blocking)
