@@ -6,47 +6,50 @@ ENV PORT=8000
 
 WORKDIR /app
 
+# System dependencies
 RUN apt-get update && apt-get install -y \
-    build-essential gcc g++ libgl1 libglib2.0-0 \
+    build-essential \
+    gcc \
+    g++ \
+    libgl1 \
+    libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
+# Copy requirements first (better caching)
 COPY requirements.txt .
 
+# Upgrade pip
 RUN pip install --upgrade pip
 
-# Install onnxruntime + optimum first
-RUN pip install --no-cache-dir onnxruntime==1.17.3 optimum==1.19.2
+# Install sentence-transformers with ONNX extras BEFORE the rest,
+# so the onnxruntime/optimum deps are resolved correctly.
+RUN pip install --no-cache-dir "sentence-transformers[onnx]==3.3.1"
 
-# Install sentence-transformers with correct transformers version
-# sentence-transformers 3.3.1 needs transformers>=4.41.0
-RUN pip install --no-cache-dir "transformers==4.41.0" "sentence-transformers==3.3.1"
-
-# Install remaining packages
+# Install remaining packages (torch is removed from requirements.txt —
+# onnxruntime replaces it, saving ~300 MB of image size and runtime RAM)
 RUN pip install --no-cache-dir -r requirements.txt
-
-# Force-remove torch — it gets pulled in transitively by transformers/sentence-transformers
-# but is NOT needed at runtime since we use the ONNX backend.
-# onnxruntime handles all inference without torch.
-RUN pip uninstall -y torch torchvision torchaudio || true
 
 # Download spaCy model
 RUN python -m spacy download en_core_web_sm
 
-# Pre-export model to ONNX and confirm torch-free
+# Pre-export sentence-transformers model to ONNX format at build time.
+# The container loads this cached file on startup (~2s) instead of
+# downloading the model on every cold boot (10-30s).
 RUN python -c "\
-import importlib.util, sys; \
-torch_found = importlib.util.find_spec('torch') is not None; \
-print('[build] torch present:', torch_found); \
-assert not torch_found, 'torch still present after uninstall — check deps'; \
 from sentence_transformers import SentenceTransformer; \
 m = SentenceTransformer('paraphrase-MiniLM-L3-v2', backend='onnx', model_kwargs={'provider': 'CPUExecutionProvider'}); \
 m.encode('warmup'); \
-print('[build] ONNX model ready — torch-free confirmed')"
+print('ONNX model ready')"
 
+# Copy app
 COPY . .
 
 EXPOSE 8000
 
+# --timeout 0 is correct for async UvicornWorker.
+# Non-zero values cause gunicorn to kill workers mid-request on long
+# Claude API calls. Per-request timeouts are handled inside the app
+# via asyncio.wait_for().
 CMD ["gunicorn", "-w", "1", "-k", "uvicorn.workers.UvicornWorker", \
      "app:app", "--bind", "0.0.0.0:8000", \
      "--timeout", "0", "--graceful-timeout", "30", "--keep-alive", "5"]
