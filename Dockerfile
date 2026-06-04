@@ -6,49 +6,43 @@ ENV PORT=8000
 
 WORKDIR /app
 
-# System dependencies
 RUN apt-get update && apt-get install -y \
-    build-essential \
-    gcc \
-    g++ \
-    libgl1 \
-    libglib2.0-0 \
+    build-essential gcc g++ libgl1 libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first (better caching)
 COPY requirements.txt .
 
-# Upgrade pip
 RUN pip install --upgrade pip
 
-# Install onnxruntime + optimum FIRST, standalone.
-# This ensures the ONNX deps are present before sentence-transformers resolves.
+# Install onnxruntime + optimum first
 RUN pip install --no-cache-dir onnxruntime==1.17.3 optimum==1.19.2
 
-# Install sentence-transformers WITHOUT torch.
-# --no-deps skips auto-installing torch (which would add ~700MB).
-# All real deps (numpy, transformers, tokenizers etc.) are in requirements.txt.
-RUN pip install --no-cache-dir --no-deps "sentence-transformers==3.3.1"
+# Install sentence-transformers with correct transformers version
+# sentence-transformers 3.3.1 needs transformers>=4.41.0
+RUN pip install --no-cache-dir "transformers==4.41.0" "sentence-transformers==3.3.1"
 
 # Install remaining packages
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Force-remove torch — it gets pulled in transitively by transformers/sentence-transformers
+# but is NOT needed at runtime since we use the ONNX backend.
+# onnxruntime handles all inference without torch.
+RUN pip uninstall -y torch torchvision torchaudio || true
+
 # Download spaCy model
 RUN python -m spacy download en_core_web_sm
 
-# Pre-export model to ONNX at build time so cold starts are instant.
-# Verify torch is NOT present — fail the build if it snuck in.
+# Pre-export model to ONNX and confirm torch-free
 RUN python -c "\
 import importlib.util, sys; \
 torch_found = importlib.util.find_spec('torch') is not None; \
 print('[build] torch present:', torch_found); \
-assert not torch_found, 'ERROR: torch was installed — build aborted to prevent OOM on Render'; \
+assert not torch_found, 'torch still present after uninstall — check deps'; \
 from sentence_transformers import SentenceTransformer; \
 m = SentenceTransformer('paraphrase-MiniLM-L3-v2', backend='onnx', model_kwargs={'provider': 'CPUExecutionProvider'}); \
 m.encode('warmup'); \
-print('[build] ONNX model ready — torch-free image confirmed')"
+print('[build] ONNX model ready — torch-free confirmed')"
 
-# Copy app
 COPY . .
 
 EXPOSE 8000
