@@ -186,7 +186,7 @@ def compute_ats_similarity(text: str, job_embedding) -> float:
     chunks = list(dict.fromkeys(c for c in chunks if c.strip()))
 
     # ── Encode all chunks at once (batched → fast) ────────────────────────────
-    chunk_embeddings = embedder.encode(chunks, convert_to_tensor=True, batch_size=32)
+    chunk_embeddings = embedder.encode(chunks, batch_size=32)
     sims = util.cos_sim(chunk_embeddings, job_embedding)   # shape: (N, 1)
     best = float(sims.max().item())
 
@@ -522,7 +522,7 @@ async def shortlist_candidates(
     # Compose enriched job text — repeat skills 3× so they dominate the embedding
     skills_text = " ".join(job_skills_list)
     job_text = f"{job_description} {skills_text} {skills_text} {skills_text}".strip()
-    job_embedding = embedder.encode(job_text, convert_to_tensor=True)
+    job_embedding = embedder.encode(job_text)
 
     # ── FIX 1: Skip resumes whose application is already Shortlisted ─────────
     # Prevents duplicate shortlist entries and re-processing on repeated clicks.
